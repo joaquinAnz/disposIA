@@ -8,7 +8,7 @@ import os
 
 app = FastAPI()
 
-# Habilitar CORS para que Swagger funcione bien
+# Habilitar CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +20,7 @@ app.add_middleware(
 DB = "songs.db"
 MELODY_DIR = "melodias"
 
-# Crear DB si no existe
+# Crear base de datos si no existe
 conn = sqlite3.connect(DB)
 conn.execute("""
 CREATE TABLE IF NOT EXISTS songs (
@@ -35,32 +35,27 @@ conn.close()
 
 
 # ==========================================
-#   ENDPOINT: Registrar canción con audio
+#   ENDPOINT: Registrar canción
 # ==========================================
 @app.post("/registrar")
-async def registrar_cancion(
-    title: str,
-    artist: str,
-    file: UploadFile = File(...)
-):
+async def registrar_cancion(title: str, artist: str, file: UploadFile = File(...)):
     audio_bytes = await file.read()
 
-    # Extraer la melodía del archivo subido
     melody = extract_pitch(audio_bytes)
     if melody is None or len(melody) == 0:
         return {"error": "No se pudo extraer la melodía del audio"}
 
-    # Crear carpeta si no existe
+    # NORMALIZAR MELODÍA ANTES DE GUARDAR
+    melody = (np.array(melody) - np.mean(melody)) / np.std(melody)
+    melody = melody.tolist()
+
     os.makedirs(MELODY_DIR, exist_ok=True)
 
-    # Nombre del archivo .npy donde se guardará la melodía
     melody_filename = f"{title}_{artist}.npy".replace(" ", "_")
     melody_path = os.path.join(MELODY_DIR, melody_filename)
 
-    # Guardar el array de pitch
     np.save(melody_path, melody)
 
-    # Registrar en DB
     conn = sqlite3.connect(DB)
     conn.execute(
         "INSERT INTO songs (title, artist, melody_path) VALUES (?, ?, ?)",
@@ -78,19 +73,19 @@ async def registrar_cancion(
 
 
 # ==========================================
-#   ENDPOINT: Buscar canción por similitud
+#   ENDPOINT: Buscar canción
 # ==========================================
 @app.post("/buscar")
 async def buscar_cancion(file: UploadFile = File(...)):
-    # Leer archivo subido
     audio_bytes = await file.read()
 
-    # Extraer melodia del audio de entrada
     input_melody = extract_pitch(audio_bytes)
     if input_melody is None or len(input_melody) == 0:
         return {"error": "No se pudo extraer la melodía del audio de entrada"}
 
-    # Leer canciones registradas en la DB
+    # NORMALIZAR MELODÍA DE ENTRADA
+    input_melody = (np.array(input_melody) - np.mean(input_melody)) / np.std(input_melody)
+
     conn = sqlite3.connect(DB)
     songs = conn.execute("SELECT id, title, artist, melody_path FROM songs").fetchall()
     conn.close()
@@ -101,21 +96,19 @@ async def buscar_cancion(file: UploadFile = File(...)):
     best_match = None
     best_distance = float("inf")
 
-    # Comparar DTW con cada canción
     for song_id, title, artist, melody_path in songs:
         full_path = os.path.join(MELODY_DIR, melody_path)
 
-        # Verificar que exista el archivo .npy
         if not os.path.exists(full_path):
             continue
 
-        # Cargar melodía registrada
         ref_melody = np.load(full_path, allow_pickle=True)
 
-        # Calcular distancia DTW
+        # NORMALIZAR MELODÍA REGISTRADA
+        ref_melody = (ref_melody - np.mean(ref_melody)) / np.std(ref_melody)
+
         distance = dtw_distance(input_melody, ref_melody)
 
-        # Buscar el mínimo
         if distance < best_distance:
             best_distance = distance
             best_match = {
@@ -125,10 +118,21 @@ async def buscar_cancion(file: UploadFile = File(...)):
                 "distance": float(distance)
             }
 
+    # UMBRAL INTELIGENTE
+    UMBRAL = 300
+
+
     if best_match is None:
-        return {"error": "No se encontró coincidencia"}
+        return {"error": "No se encontró ninguna coincidencia"}
+
+    if best_distance > UMBRAL:
+        return {
+            "mensaje": "No se encontró coincidencia suficientemente parecida",
+            "distance": best_distance
+        }
 
     return {
         "mensaje": "Canción más parecida encontrada",
-        "resultado": best_match
+        "resultado": best_match,
+        "distance": best_distance
     }
